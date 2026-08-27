@@ -1,0 +1,17 @@
+name: qa-basic
+cases:
+  - id: capital-of-france
+    prompt: "What is the capital of France? Answer with just the city name."
+    scorer: exact_match
+    expected: "Paris"
+
+  - id: contains-keywords
+    prompt: "List three primary colors."
+    scorer: keyword_overlap
+    expected: ["red", "blue", "yellow"]
+    threshold: 0.66
+
+  - id: format-check
+    prompt: "Return today's date in YYYY-MM-DD format."
+    scorer: regex_match
+    expected: "^\\d{4}-\\d{2}-\\d{2}$"
