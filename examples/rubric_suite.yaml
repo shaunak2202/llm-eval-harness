@@ -1,0 +1,10 @@
+name: rubric-basic
+cases:
+  - id: hash-map-explanation
+    prompt: "Explain what a hash map is, in 2 sentences, to a beginner."
+    scorer: llm_rubric
+    expected: |
+      Score 1.0 if the explanation is correct, avoids undefined jargon, and
+      is 1-3 sentences long. Score 0.0 if it is wrong or far too long.
+      Give partial credit for partially meeting these criteria.
+    threshold: 0.5
