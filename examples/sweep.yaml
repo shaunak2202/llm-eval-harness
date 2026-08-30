@@ -1,0 +1,15 @@
+# Example sweep config: run the same suite against several configs in one
+# `evalharness sweep` invocation. Each entry's extra keys (model, base_url,
+# temperature, retries) are forwarded straight to the provider.
+configs:
+  - name: mock-baseline
+    provider: mock
+  - name: mock-again
+    provider: mock
+  # Example of what a real sweep across models might look like:
+  # - name: gpt-4o-mini
+  #   provider: openai
+  #   model: gpt-4o-mini
+  # - name: gpt-4o
+  #   provider: openai
+  #   model: gpt-4o

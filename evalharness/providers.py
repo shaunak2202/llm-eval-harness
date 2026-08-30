@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
+import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -45,8 +47,8 @@ class MockProvider(Provider):
     }
 
     def __init__(self, **kwargs):
-        # Accept and ignore model/base_url/temperature so the CLI can pass
-        # the same kwargs to any provider uniformly.
+        # Accept and ignore model/base_url/temperature/retries etc so the CLI
+        # can pass the same kwargs to any provider uniformly.
         pass
 
     def generate(self, prompt: str, **kwargs) -> str:
@@ -68,6 +70,10 @@ class MockProvider(Provider):
         return f"<mock-response-{digest}>"
 
 
+class RetryableHTTPError(RuntimeError):
+    """Raised for transient (retryable) HTTP/network failures."""
+
+
 class OpenAIProvider(Provider):
     """Provider for any OpenAI-compatible chat-completions HTTP API.
 
@@ -75,10 +81,10 @@ class OpenAIProvider(Provider):
     explicit `api_key` kwarg). Uses only the standard library for the HTTP
     call to avoid pulling in an extra dependency for a small eval tool.
 
-    Note: this has no retry/backoff logic -- a network error or non-200
-    response raises immediately. That's an acceptable tradeoff for a small
-    eval harness but is called out here (and in the README) rather than
-    pretending it's production-hardened.
+    Retries with exponential backoff + jitter on transient failures: HTTP 429
+    (rate limited), HTTP 5xx (server error), and `URLError` (connection
+    problems). Does NOT retry on other 4xx errors (e.g. 401 bad key, 400 bad
+    request) since those won't succeed on a retry.
     """
 
     name = "openai"
@@ -90,12 +96,32 @@ class OpenAIProvider(Provider):
         temperature: float = 0.0,
         api_key: str | None = None,
         timeout: float = 30.0,
+        retries: int = 3,
+        backoff_base: float = 0.5,
+        sleep_fn=time.sleep,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.temperature = temperature
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.timeout = timeout
+        self.retries = max(1, retries)
+        self.backoff_base = backoff_base
+        self._sleep = sleep_fn
+
+    def _do_request(self, req):
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            if e.code == 429 or e.code >= 500:
+                raise RetryableHTTPError(
+                    f"OpenAI-compatible API returned {e.code}: {detail}"
+                ) from e
+            raise RuntimeError(f"OpenAI-compatible API returned {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise RetryableHTTPError(f"Failed to reach {self.base_url}: {e}") from e
 
     def generate(self, prompt: str, **kwargs) -> str:
         if not self.api_key:
@@ -110,29 +136,37 @@ class OpenAIProvider(Provider):
         }
         body = json.dumps(payload).encode("utf-8")
 
-        req = urllib.request.Request(
-            url=f"{self.base_url}/chat/completions",
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-        )
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            req = urllib.request.Request(
+                url=f"{self.base_url}/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+            )
+            try:
+                data = self._do_request(req)
+            except RetryableHTTPError as e:
+                last_error = e
+                if attempt < self.retries - 1:
+                    delay = self.backoff_base * (2**attempt) + random.uniform(0, self.backoff_base)
+                    self._sleep(delay)
+                    continue
+                raise RuntimeError(
+                    f"Request failed after {self.retries} attempts: {e}"
+                ) from e
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenAI-compatible API returned {e.code}: {detail}") from e
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"Failed to reach {self.base_url}: {e}") from e
+            try:
+                return data["choices"][0]["message"]["content"].strip()
+            except (KeyError, IndexError, TypeError) as e:
+                raise RuntimeError(f"Unexpected response shape from API: {data}") from e
 
-        try:
-            return data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError) as e:
-            raise RuntimeError(f"Unexpected response shape from API: {data}") from e
+        # Unreachable in practice (loop either returns or raises), but keeps
+        # type-checkers happy and guards against future refactors.
+        raise RuntimeError(f"Request failed: {last_error}")
 
 
 PROVIDERS = {
