@@ -59,3 +59,66 @@ def test_openai_provider_parses_response(monkeypatch):
     monkeypatch.setattr("evalharness.providers.urllib.request.urlopen", fake_urlopen)
     result = p.generate("What is the capital of France?")
     assert result == "Paris"
+
+
+def test_openai_provider_retries_on_429_then_succeeds(monkeypatch):
+    import urllib.error
+
+    sleeps = []
+    p = OpenAIProvider(api_key="fake-key", retries=3, backoff_base=0.01, sleep_fn=lambda s: sleeps.append(s))
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = json.dumps(payload).encode("utf-8")
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.HTTPError(req.full_url, 429, "rate limited", hdrs=None, fp=None)
+        return FakeResp({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("evalharness.providers.urllib.request.urlopen", fake_urlopen)
+    result = p.generate("hello")
+    assert result == "ok"
+    assert calls["n"] == 3
+    assert len(sleeps) == 2  # slept before 2nd and 3rd attempts
+
+
+def test_openai_provider_gives_up_after_max_retries(monkeypatch):
+    import urllib.error
+
+    p = OpenAIProvider(api_key="fake-key", retries=2, backoff_base=0.01, sleep_fn=lambda s: None)
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 503, "unavailable", hdrs=None, fp=None)
+
+    monkeypatch.setattr("evalharness.providers.urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(RuntimeError, match="failed after 2 attempts"):
+        p.generate("hello")
+
+
+def test_openai_provider_does_not_retry_on_401(monkeypatch):
+    import urllib.error
+
+    calls = {"n": 0}
+    p = OpenAIProvider(api_key="fake-key", retries=3, backoff_base=0.01, sleep_fn=lambda s: None)
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", hdrs=None, fp=None)
+
+    monkeypatch.setattr("evalharness.providers.urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(RuntimeError, match="returned 401"):
+        p.generate("hello")
+    assert calls["n"] == 1  # no retries on non-transient 4xx
