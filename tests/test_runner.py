@@ -48,3 +48,17 @@ def test_run_suite_unknown_prompt_uses_placeholder():
     assert result.total_count == 1
     assert result.pass_count == 0
     assert result.case_results[0].output.startswith("<mock-response-")
+
+
+def test_run_suite_json_roundtrip():
+    suite = TestSuite(
+        name="test-suite",
+        cases=[
+            TestCase(id="c1", prompt="capital of France?", scorer="exact_match", expected="Paris"),
+        ],
+    )
+    result = run_suite(suite, MockProvider())
+    data = result.to_dict()
+    assert data["suite_name"] == "test-suite"
+    assert data["case_results"][0]["case_id"] == "c1"
+    assert data["pass_count"] == 1
